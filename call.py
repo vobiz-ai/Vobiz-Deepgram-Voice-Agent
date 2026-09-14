@@ -2,11 +2,12 @@
 call.py — place an outbound Vobiz call into the Deepgram agent.
 
     python call.py                          # dial TO_NUMBER from .env
-    python call.py --to +9198XXXXXXXX
+    python call.py --to +919XXXXXXXXX       # +91 or a leading 0 — a bare 10-digit
+    python call.py --to 09XXXXXXXXX         # number is rejected
     python call.py --host abc123.ngrok-free.app   # override PUBLIC_HOSTNAME
 
-Inbound calls need none of this — just point the number's answer URL at
-https://PUBLIC_HOSTNAME/answer. This is for dialling out to test.
+Inbound calls need none of this — create a Voice Application pointing at
+https://PUBLIC_HOSTNAME/answer and attach a number to it. This is for dialling out.
 
 Start `python app.py` and the tunnel first; Vobiz fetches the answer URL the
 moment the callee picks up.
@@ -32,7 +33,8 @@ AUTH_TOKEN = os.getenv("VOBIZ_AUTH_TOKEN", "")
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--to", default=os.getenv("TO_NUMBER", ""), help="destination number")
+    parser.add_argument("--to", default=os.getenv("TO_NUMBER", ""),
+                        help="destination number, prefixed with +91 or a leading 0")
     parser.add_argument("--from", dest="from_", default=os.getenv("FROM_NUMBER", ""),
                         help="a DID this account owns")
     parser.add_argument("--host", default=os.getenv("PUBLIC_HOSTNAME", ""),

@@ -46,13 +46,47 @@ cp .env.example .env
 python app.py
 ```
 
-Expose the server publicly and point your Vobiz number's **Answer URL** at
-`https://YOUR_HOST/answer`. `GET /health` echoes the URLs and audio profile it resolved.
+Expose the server publicly — `GET /health` echoes the URLs and audio profile it resolved.
+Whichever host you use becomes the answer URL in the two sections below.
 
-To dial out instead:
+## Inbound Calls
+
+Vobiz decides what to do with an inbound call by looking up the **Voice Application** attached
+to the number that was dialled. So a number alone is not enough: create an application pointing
+at your answer URL, then attach a number to it.
+
+### 1. Create a Voice Application
+
+In the Vobiz console, go to **Voice Applications → Create application**. Set **Primary answer
+URL** to `https://YOUR_HOST/answer` with method **POST**. Optionally set the **Hangup URL** to
+`https://YOUR_HOST/hangup` to receive the call-ended webhook.
+
+![Create a Voice Application with your answer URL](docs/create-voice-application.png)
+
+### 2. Attach a number
+
+Open the application and attach one of your DIDs under **Attached Numbers → Attach number**.
+Calls to that number now fetch XML from your answer URL.
+
+![Attach a number to the application](docs/attach-number.png)
+
+Call the number and you should hear the greeting.
+
+## Outbound Calls
+
+`call.py` places a call and points it at this server, so no Voice Application is needed:
 
 ```bash
-python call.py --to +91XXXXXXXXXX
+python call.py --to +919XXXXXXXXX
+```
+
+The destination must carry a prefix — either `+91` or a leading `0`. A bare 10-digit number is
+rejected, and the error comes back as a country-code failure rather than a validation message:
+
+```bash
+python call.py --to +919XXXXXXXXX    # works
+python call.py --to 09XXXXXXXXX      # works
+python call.py --to 9XXXXXXXXX       # fails — no country code
 ```
 
 ## Environment Variables
@@ -153,6 +187,8 @@ Four behaviours are worth knowing before changing anything:
 | WebSocket closes with 1008 | `STREAM_SECRET` does not match the secret in the stream URL path |
 | `/answer` returns 403 | `VERIFY_SIGNATURE=true` but the callback URL has no auth credentials configured, so no signature headers are sent |
 | Outbound call returns 401 or 402 | `401` credentials, `402` balance. *"from number … not owned"* means the DID belongs to another account |
+| Outbound call fails with *"failed getting country code"* | The `--to` number has no prefix. Use `+91` or a leading `0` |
+| Inbound call is never answered | The number has no Voice Application attached, or the application's answer URL does not point at this server. See [Inbound Calls](#inbound-calls) |
 
 ## Resources
 
