@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+deepgram-sdk>=7.7.0
+python-dotenv
+python-multipart
+websockets
+requests
