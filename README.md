@@ -161,3 +161,16 @@ Four behaviours are worth knowing before changing anything:
 - [Vobiz callback validation](https://www.vobiz.ai/docs/concepts/validating-callbacks)
 - [Deepgram Voice Agent API](https://developers.deepgram.com/docs/voice-agent)
 - [Deepgram Flux (conversational STT)](https://developers.deepgram.com/docs/flux/feature-overview)
+
+---
+
+## Built by Team Vobiz
+
+[Vobiz](https://vobiz.ai) is a programmable voice & SIP-trunking platform. This
+reference implementation is maintained by the Vobiz team.
+
+Author: **Piyush Sahoo** — [LinkedIn](https://www.linkedin.com/in/piyush-s713/)
+
+## License
+
+[MIT](./LICENSE) © Vobiz
