@@ -70,7 +70,8 @@ Calls to that number now fetch XML from your answer URL.
 
 ![Attach a number to the application](docs/attach-number.png)
 
-Call the number and you should hear the greeting.
+Dial the attached number with a `0` or `+91` prefix — `09XXXXXXXXX` or `+919XXXXXXXXX`.
+You should hear the greeting.
 
 ## Outbound Calls
 
@@ -78,15 +79,6 @@ Call the number and you should hear the greeting.
 
 ```bash
 python call.py --to +919XXXXXXXXX
-```
-
-The destination must carry a prefix — either `+91` or a leading `0`. A bare 10-digit number is
-rejected, and the error comes back as a country-code failure rather than a validation message:
-
-```bash
-python call.py --to +919XXXXXXXXX    # works
-python call.py --to 09XXXXXXXXX      # works
-python call.py --to 9XXXXXXXXX       # fails — no country code
 ```
 
 ## Environment Variables
@@ -187,8 +179,8 @@ Four behaviours are worth knowing before changing anything:
 | WebSocket closes with 1008 | `STREAM_SECRET` does not match the secret in the stream URL path |
 | `/answer` returns 403 | `VERIFY_SIGNATURE=true` but the callback URL has no auth credentials configured, so no signature headers are sent |
 | Outbound call returns 401 or 402 | `401` credentials, `402` balance. *"from number … not owned"* means the DID belongs to another account |
-| Outbound call fails with *"failed getting country code"* | The `--to` number has no prefix. Use `+91` or a leading `0` |
 | Inbound call is never answered | The number has no Voice Application attached, or the application's answer URL does not point at this server. See [Inbound Calls](#inbound-calls) |
+| Inbound call does not connect | Dial the number with a `0` or `+91` prefix |
 
 ## Resources
 
