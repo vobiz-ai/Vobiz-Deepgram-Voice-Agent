@@ -13,6 +13,21 @@ turn-taking.
 Out of the box it uses Deepgram's India region, an Indian-accented voice, and a keyterm list
 tuned for Indian vocabulary.
 
+> **Want background ambience or a faster speaking voice?** Those live on the
+> [`office-ambience`](https://github.com/vobiz-ai/Vobiz-Deepgram-Voice-Agent/tree/office-ambience)
+> branch. It adds `TTS_SPEED` for the speaking rate, and `AMBIENCE=office` to mix a
+> continuous office bed behind the agent so the caller hears a room rather than a
+> silent void — which on a phone call is most of what makes an agent sound synthetic.
+> Enabling the bed changes how audio is paced, so it is kept off `main` deliberately.
+>
+> ```bash
+> git checkout office-ambience
+> # then in .env:
+> #   TTS_SPEED=1.2
+> #   AMBIENCE=office
+> #   AMBIENCE_LEVEL=0.06
+> ```
+
 ## Architecture
 
 ```mermaid
