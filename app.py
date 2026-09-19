@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from html import escape
 from urllib.parse import parse_qsl
 
+import ambience as _ambience
 from deepgram import AsyncDeepgramClient
 from deepgram.environment import DeepgramClientEnvironment
 from deepgram.agent.v1 import (
@@ -173,6 +174,30 @@ FRAME_MS = 20
 # when something has gone wrong -- and when it does, a clipped word beats an agent
 # that has gone silent for the rest of the call.
 CLEAR_ACK_TIMEOUT_S = float(os.getenv("CLEAR_ACK_TIMEOUT_S", "1.0"))
+
+# With ambience on, this app paces its own output instead of handing Vobiz a whole
+# turn at once, so it owns the real-time deadline. PRIME_FRAMES is how many frames
+# of head start to build before settling into the 20 ms cadence: enough that a late
+# task wake-up is absorbed by the media server's buffer rather than heard as a gap,
+# small enough that a barge-in has little queued audio left to discard.
+PRIME_FRAMES = int(os.getenv("PRIME_FRAMES", "4"))
+
+# --- Background ambience --------------------------------------------------------
+# Deepgram returns clean speech on a silent background, which on a phone call reads
+# as synthetic long before the words do -- a person calling a support line expects to
+# hear a room behind the voice. There is no Deepgram setting for this, so the room is
+# mixed in here, on the way out.
+#
+# Off by default, deliberately. Anyone cloning this to evaluate Deepgram should hear
+# what Deepgram actually produces, not a room mixed in on top of it. Set
+# AMBIENCE=office to enable; 0.10 is the level chosen by listening over a real call,
+# present enough to place the voice in a room without competing with it.
+AMBIENCE = _optional("AMBIENCE", "off").lower()
+AMBIENCE_LEVEL = float(_optional("AMBIENCE_LEVEL", "0.06"))
+if AMBIENCE not in ("off", "office"):
+    raise SystemExit(f"AMBIENCE must be 'off' or 'office', got {AMBIENCE!r}")
+if not 0.0 <= AMBIENCE_LEVEL <= 1.0:
+    raise SystemExit(f"AMBIENCE_LEVEL must be between 0.0 and 1.0, got {AMBIENCE_LEVEL}")
 
 AUDIO_PROFILES = {
     # Matches the PSTN leg exactly, both directions. Deepgram resamples internally
@@ -382,6 +407,12 @@ LOCALES = {
     ),
 }
 
+AMBIENCE_BED = (
+    _ambience.Ambience(PROFILE.play_sample_rate, AMBIENCE_LEVEL)
+    if AMBIENCE != "off"
+    else None
+)
+
 AGENT_LOCALE = _optional("AGENT_LOCALE", "en-in").lower()
 if AGENT_LOCALE not in LOCALES:
     raise SystemExit(f"AGENT_LOCALE must be one of {sorted(LOCALES)}, got {AGENT_LOCALE!r}")
@@ -422,6 +453,16 @@ DG_TTS_MODEL = _optional("DG_TTS_MODEL", LOCALE.tts_model)
 # India -- it executes wherever the model provider runs -- which is why these
 # numbers are what they are and why the ranking is worth re-checking from your own
 # region rather than taken on faith.
+# Flux TTS at 1.0 sounds unhurried in a way that reads as slow on a phone call --
+# callers on a support line expect a brisker pace than a podcast. 1.2 was chosen by
+# listening to the same sentence rendered at 1.0, 1.1 and 1.2 over an 8 kHz leg.
+# Deepgram accepts 0.5-1.5 in 0.05 steps; diction starts to suffer past roughly 1.3,
+# and the telephony passband is unforgiving of it, so treat 1.2 as near the ceiling.
+TTS_SPEED = float(_optional("TTS_SPEED", "1.2"))
+if not 0.5 <= TTS_SPEED <= 1.5:
+    raise SystemExit(f"TTS_SPEED must be between 0.5 and 1.5, got {TTS_SPEED}")
+TTS_SPEED = round(round(TTS_SPEED / 0.05) * 0.05, 2)  # API accepts 0.05 steps only
+
 LLM_PROVIDER = _optional("LLM_PROVIDER", "anthropic")
 LLM_MODEL = _optional("LLM_MODEL", "claude-haiku-4-5")
 
@@ -501,7 +542,14 @@ AGENT_SETTINGS = AgentV1Settings.model_validate(
                 "provider": {"type": LLM_PROVIDER, "model": LLM_MODEL},
                 "prompt": PROMPT,
             },
-            "speak": {"provider": {"type": "deepgram", "version": "v2", "model": DG_TTS_MODEL}},
+            "speak": {
+                "provider": {
+                    "type": "deepgram",
+                    "version": "v2",
+                    "model": DG_TTS_MODEL,
+                    "speed": TTS_SPEED,
+                }
+            },
             "greeting": GREETING,
         },
     }
@@ -607,6 +655,10 @@ class VobizStream:
         self._awaiting_clear = False  # a clearAudio flush is in flight
         self._held = b""             # audio that arrived during that flush
         self._clear_sent_at = 0.0    # when, so the wait cannot last forever
+        # Paced mode (ambience on): speech waiting to go out under the bed.
+        self._speech = bytearray()
+        self._pump: asyncio.Task | None = None
+        self._checkpoint_due = False
 
     def read_start(self, message: dict) -> None:
         """Absorb the start event. Raises if it cannot be used to send audio."""
@@ -642,6 +694,65 @@ class VobizStream:
     async def _send(self, payload: dict) -> None:
         await self.ws.send_text(json.dumps(payload))
 
+    # --- paced output, used only when ambience is on ---------------------------
+    def start_bed(self) -> None:
+        """Begin emitting a continuous 20 ms cadence once the stream is identified."""
+        if AMBIENCE_BED is not None and self._pump is None:
+            self._pump = asyncio.create_task(self._run_bed())
+
+    async def stop_bed(self) -> None:
+        if self._pump is not None:
+            self._pump.cancel()
+            await asyncio.gather(self._pump, return_exceptions=True)
+            self._pump = None
+
+    async def _run_bed(self) -> None:
+        """Emit one frame every 20 ms for the life of the call.
+
+        The room has to be audible while the agent is silent, which means this app
+        must produce audio continuously rather than only when Deepgram sends some.
+        Frames play in the order they arrive, so the bed cannot be layered on after
+        the fact -- speech is mixed into this stream as it becomes available.
+
+        The deadline advances by a fixed step rather than by sleeping 20 ms each
+        time, so scheduling jitter does not accumulate into drift over a long call.
+        """
+        size = PROFILE.frame_bytes
+        quiet = (b"\xff" if PROFILE.bytes_per_sample == 1 else b"\x00\x00") * (
+            size // PROFILE.bytes_per_sample
+        )
+        loop = asyncio.get_running_loop()
+        due = loop.time()
+        primed = 0
+        try:
+            while True:
+                if len(self._speech) >= size and not self._awaiting_clear:
+                    chunk = bytes(self._speech[:size])
+                    del self._speech[:size]
+                elif self._speech and not self._awaiting_clear and self._checkpoint_due:
+                    # Final partial frame of a turn; pad it out rather than hold it.
+                    chunk = bytes(self._speech).ljust(size, quiet[:1])
+                    self._speech.clear()
+                else:
+                    chunk = quiet
+                await self._send(self._frame(chunk))
+
+                if self._checkpoint_due and not self._speech:
+                    self._checkpoint_due = False
+                    await self._mark_turn()
+
+                if primed < PRIME_FRAMES:
+                    primed += 1
+                    continue  # build the cushion before pacing
+                due += FRAME_MS / 1000
+                delay = due - loop.time()
+                if delay < -0.25:
+                    due = loop.time()   # fell far behind; resync instead of spiralling
+                elif delay > 0:
+                    await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+
     async def play(self, audio: bytes) -> None:
         """Queue agent audio for the caller as 20 ms playAudio frames.
 
@@ -651,6 +762,9 @@ class VobizStream:
         emitting a short one at each chunk boundary.
         """
         if not self.stream_id:
+            return
+        if self._pump is not None:
+            self._speech += audio      # the bed task will emit it
             return
         if self._awaiting_clear:
             # Wait for the flush to be acknowledged -- but never indefinitely. If the
@@ -669,34 +783,34 @@ class VobizStream:
         size = PROFILE.frame_bytes
         whole = len(buffer) - (len(buffer) % size)
         for offset in range(0, whole, size):
-            await self._send(
-                {
-                    "event": "playAudio",
-                    "streamId": self.stream_id,
-                    "media": {
-                        "contentType": PROFILE.play_content_type,
-                        "sampleRate": PROFILE.play_sample_rate,
-                        "payload": base64.b64encode(buffer[offset:offset + size]).decode(),
-                    },
-                }
-            )
+            await self._send(self._frame(buffer[offset:offset + size]))
         self._pending = buffer[whole:]
+
+    def _frame(self, audio: bytes) -> dict:
+        """One playAudio event, with the room mixed under the voice if enabled."""
+        if AMBIENCE_BED is not None:
+            audio = (
+                AMBIENCE_BED.under_mulaw(audio)
+                if PROFILE.bytes_per_sample == 1
+                else AMBIENCE_BED.under_linear16(audio)
+            )
+        return {
+            "event": "playAudio",
+            "streamId": self.stream_id,
+            "media": {
+                "contentType": PROFILE.play_content_type,
+                "sampleRate": PROFILE.play_sample_rate,
+                "payload": base64.b64encode(audio).decode(),
+            },
+        }
 
     async def flush(self) -> None:
         """Emit any partial frame held back by play(), at the end of a turn."""
+        if self._pump is not None:
+            return                     # the bed task drains and pads it instead
         if self.stream_id and self._pending:
             tail, self._pending = self._pending, b""
-            await self._send(
-                {
-                    "event": "playAudio",
-                    "streamId": self.stream_id,
-                    "media": {
-                        "contentType": PROFILE.play_content_type,
-                        "sampleRate": PROFILE.play_sample_rate,
-                        "payload": base64.b64encode(tail).decode(),
-                    },
-                }
-            )
+            await self._send(self._frame(tail))
 
     async def clear(self) -> None:
         """Barge-in: drop whatever Vobiz still holds buffered for playback.
@@ -712,6 +826,8 @@ class VobizStream:
         if not self.stream_id:
             return
         self._pending = b""
+        self._speech.clear()
+        self._checkpoint_due = False
         self.unheard.clear()
         self._awaiting_clear = True
         self._clear_sent_at = asyncio.get_running_loop().time()
@@ -724,6 +840,14 @@ class VobizStream:
         if held:
             await self.play(held)
 
+    async def _mark_turn(self) -> None:
+        """Send the checkpoint itself. Split out so the bed task can defer it until
+        the turn's audio has genuinely left, rather than when Deepgram stopped."""
+        self.turns += 1
+        name = f"turn-{self.turns}"
+        self.unheard.add(name)
+        await self._send({"event": "checkpoint", "streamId": self.stream_id, "name": name})
+
     async def checkpoint(self) -> None:
         """Mark the end of a turn and remember it until Vobiz says it was played.
 
@@ -735,10 +859,10 @@ class VobizStream:
         """
         if not self.stream_id:
             return
-        self.turns += 1
-        name = f"turn-{self.turns}"
-        self.unheard.add(name)
-        await self._send({"event": "checkpoint", "streamId": self.stream_id, "name": name})
+        if self._pump is not None:
+            self._checkpoint_due = True   # the bed task sends it once speech drains
+            return
+        await self._mark_turn()
 
     def mark_played(self, name: str | None) -> None:
         self.unheard.discard(name or "")
@@ -842,6 +966,7 @@ async def media(vobiz_ws: WebSocket, secret: str = "") -> None:
                         print(f"[call] unusable start event, closing: {exc}")
                         break
                     print(f"[call] started stream {stream.stream_id} (call {stream.call_id})")
+                    stream.start_bed()   # no-op unless ambience is enabled
                     # Sending settings is what starts the conversation, greeting included.
                     await agent.send_settings(AGENT_SETTINGS)
 
@@ -873,6 +998,7 @@ async def media(vobiz_ws: WebSocket, secret: str = "") -> None:
         except WebSocketDisconnect:
             print("[call] caller hung up")
         finally:
+            await stream.stop_bed()
             if stream.unheard:
                 # The caller never confirmed hearing these turns, which is the
                 # signature of audio dropped at the media server.
@@ -959,10 +1085,11 @@ async def health() -> JSONResponse:
                 "listen": DG_STT_MODEL,
                 "listen_language": LOCALE.stt_language or "en",
                 "think": f"{LLM_PROVIDER}/{LLM_MODEL}",
-                "speak": DG_TTS_MODEL,
+                "speak": f"{DG_TTS_MODEL} @ {TTS_SPEED:.2f}x",
                 "eot_threshold": EOT_THRESHOLD if LOCALE.stt_version == "v2" else None,
                 "eot_timeout_ms": EOT_TIMEOUT_MS if LOCALE.stt_version == "v2" else None,
             },
+            "ambience": AMBIENCE if AMBIENCE == "off" else f"{AMBIENCE} @ {AMBIENCE_LEVEL}",
             "webhook_signature_checked": VERIFY_SIGNATURE,
             "media_socket_authenticated": bool(STREAM_SECRET),
         }

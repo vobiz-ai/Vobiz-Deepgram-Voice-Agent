@@ -13,6 +13,12 @@ turn-taking.
 Out of the box it uses Deepgram's India region, an Indian-accented voice, and a keyterm list
 tuned for Indian vocabulary.
 
+> **You are on the `office-ambience` branch.** It adds two things on top of `main`: a
+> configurable TTS speaking rate, and a continuous office bed mixed behind the agent so
+> the caller hears a room rather than a silent void. Both are described under
+> [Voice delivery](#configuration) and [Background ambience](#background-ambience).
+> Ambience is still `off` by default — set `AMBIENCE=office` to hear it.
+
 ## Architecture
 
 ```mermaid
@@ -181,6 +187,33 @@ Recognition is biased toward Indian vocabulary with a keyterm list — Aadhaar, 
 IFSC, RuPay, lakh, crore, KYC, OTP and major city names. Edit `INDIA_KEYTERMS` in `app.py` to add
 your own product and domain words; brand names are the ones most often misheard.
 
+## Background ambience
+
+Deepgram returns clean speech on a silent background. On a phone call that reads as
+synthetic well before the words do — a caller reaching a support line expects to hear a
+room. Deepgram has no setting for this, so `AMBIENCE=office` mixes one in here, on the
+audio going out to Vobiz.
+
+The bed is a CC0 office recording, band-limited to the telephony passband and
+cross-faded into a seamless loop — see [assets/CREDITS.md](assets/CREDITS.md).
+
+Enabling it changes how audio is sent. Frames play in the order they arrive, so a
+continuous bed cannot be layered on after the fact: with ambience on, the app emits
+exactly one 20 ms frame for the whole call — room alone when the agent is quiet, room
+plus voice when it is not. The deadline advances by a fixed step rather than sleeping
+between frames, so jitter cannot accumulate into drift, and `PRIME_FRAMES` builds a
+small cushion first so a late task wake-up is absorbed rather than heard.
+
+Two consequences worth knowing. Vobiz only ever holds a few frames instead of a whole
+turn, which makes barge-in *more* responsive. And checkpoints fire when audio has
+actually drained rather than when Deepgram stopped sending — in paced mode those are
+different moments.
+
+With `AMBIENCE=off` none of this applies and audio is sent as Deepgram delivers it.
+
+It is off by default deliberately: anyone cloning this to evaluate Deepgram should hear
+what Deepgram actually produces.
+
 ## Configuration
 
 **Required**
@@ -199,6 +232,15 @@ your own product and domain words; brand names are the ones most often misheard.
 | `INDIC_LANGUAGE` | `ta` | Only for `AGENT_LOCALE=indic`: `ta`, `te`, `mr`, `bn`, `gu`, `pa`, `kn`, `as`, `ur` |
 | `DG_TTS_MODEL` | per locale | Override the voice |
 | `GREETING` | per locale | Override the first thing the caller hears |
+
+**Voice delivery**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TTS_SPEED` | `1.2` | Speaking rate, `0.5`–`1.5`. Deepgram accepts 0.05 steps only; other values are rounded. 1.0 sounds unhurried on a phone call; past about 1.3 diction suffers on an 8 kHz line |
+| `AMBIENCE` | `off` | `office` mixes a continuous room behind the agent — see [Background ambience](#background-ambience) |
+| `AMBIENCE_LEVEL` | `0.06` | Bed level as a fraction of full scale |
+| `PRIME_FRAMES` | `4` | Frames of head start before the paced cadence settles, when ambience is on |
 
 **Language model** — all Deepgram-managed, so no provider key is needed
 

@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.git/
+.DS_Store
+docs/
+README.md
+LICENSE
+mock_vobiz.py
+call.py
+*.wav
+*.mp3
