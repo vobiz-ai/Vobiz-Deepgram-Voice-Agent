@@ -21,11 +21,12 @@ Deepgram emits a `LatencyReport` per turn, broken down by stage. `app.py` logs i
 | `tts_latency` | first text token to first audio byte |
 | `total_latency` | caller stopped speaking to first audio byte |
 
-Deepgram also emits a report per *recognition segment*, tens of times per turn. Only the
-turn-level report carries `total_latency`, and only that one is logged — filtering on anything
-else floods the log.
+Deepgram also emits a report per *recognition segment*, tens of times per turn, which is useful
+detail when you are debugging recognition itself. Only the turn-level report carries
+`total_latency`, so that is the one `app.py` logs — the segment-level reports are far too frequent
+to belong in a call log.
 
-Measured on this stack, the split is lopsided:
+Measured on this stack, the split is uneven in a useful way:
 
 | Stage | Typical |
 |---|---|
@@ -78,7 +79,7 @@ its own endpointing.
 | Variable | Default | Effect |
 |---|---|---|
 | `EOT_THRESHOLD` | `0.7` | Confidence needed to declare the turn over, `0.5`–`1.0`. Lower ends turns sooner and risks cutting the caller off; higher waits longer and tolerates noise better |
-| `EOT_TIMEOUT_MS` | `3000` | Hard ceiling — end the turn this long after speech regardless of confidence. Deepgram's default is 5000, which is a long silence on a phone call |
+| `EOT_TIMEOUT_MS` | `3000` | Hard ceiling — end the turn this long after speech regardless of confidence. Deepgram's default of 5000 gives a speaker room to think, which suits dictation; a phone conversation has a quicker rhythm, so this agent tightens it |
 | `EAGER_EOT_THRESHOLD` | `0.4` | Start generating the reply on a medium-confidence turn end, before the turn is confirmed. If the caller was mid-sentence the speculative work is discarded |
 
 Eager end-of-turn is the cheapest latency win available: generation overlaps with the tail of the
@@ -91,18 +92,19 @@ interrupts itself.
 
 ## Why every locale replies in English
 
-Deepgram listens in nine Indian languages and speaks none of them. Flux Multilingual understands
-Hindi; Nova-3 adds Tamil, Telugu, Marathi, Bengali, Gujarati, Punjabi, Kannada, Assamese and Urdu.
-There is no Indic-language TTS voice — every Flux voice is an English model, and Aura's
-code-switching covers English and Spanish only.
+Recognition covers nine Indian languages — Flux STT Multilingual understands Hindi; Nova-3 adds
+Tamil, Telugu, Marathi, Bengali, Gujarati, Punjabi, Kannada, Assamese and Urdu — and the voices
+built for this audience are Indian-accented English. Pairing the two is what this agent does:
+understand whatever the caller speaks, answer in Indian-accented English.
 
-An earlier version of this agent replied in romanised Hindi ("aapko kya chahiye") rendered by
-`flux-naveen-en`. That sounded wrong on a call, and the `LatencyReport` showed why: the voice was
-being asked to guess grapheme-to-phoneme mappings for letter sequences English never produces.
-Synthesis was slow and the prosody audibly broken. With the same agent replying in English,
-`tts_latency` settled at 43–103 ms.
+It is worth spelling out why, because the alternative is tempting. An earlier version of this agent
+replied in romanised Hindi ("aapko kya chahiye") rendered by `flux-naveen-en`, and the
+`LatencyReport` showed the cost: an English voice model asked to synthesise romanised Hindi has to
+guess grapheme-to-phoneme mappings for letter sequences English never produces, which is slow and
+audibly rough. Replying in English put `tts_latency` at 43–103 ms — so English output is the faster
+and better-sounding choice, not a fallback.
 
-So the Indian character comes from the **voice**, not the words:
+The Indian character comes from the **voice**, which is where a caller hears it anyway:
 
 | Voice | |
 |---|---|
@@ -110,21 +112,23 @@ So the Indian character comes from the **voice**, not the words:
 | `flux-priya-en` | female — IVR, confident and reassuring |
 | `flux-naveen-en` | male — IVR, support, informative |
 
-If you genuinely need Hindi speech output, it has to come from a third-party TTS provider in the
-`speak` block — Deepgram's own multilingual guidance points at ElevenLabs or Cartesia for
-languages it cannot voice. That adds a provider key and takes the synthesis step outside
-Deepgram's managed path.
+If a deployment genuinely needs Hindi speech output, Deepgram's multilingual guidance covers it:
+point the `speak` block at a third-party provider such as ElevenLabs or Cartesia. That is a
+supported configuration — worth knowing it adds a provider key and moves synthesis outside
+Deepgram's managed path, so the single-socket latency profile above no longer applies.
 
 ## Recognition accuracy
 
-`keyterms` on the listen provider biases recognition toward words the model would otherwise miss.
-`INDIA_KEYTERMS` in `app.py` carries Indian financial and civic vocabulary — Aadhaar, UPI, PAN
-card, GST, IFSC, RuPay, lakh, crore, KYC, OTP — plus major city names.
+`keyterms` on the listen provider biases recognition toward vocabulary specific to your deployment,
+and it is the highest-leverage accuracy setting available. `INDIA_KEYTERMS` in `app.py` carries
+Indian financial and civic vocabulary — Aadhaar, UPI, PAN card, GST, IFSC, RuPay, lakh, crore, KYC,
+OTP — plus major city names.
 
-Brand names are the highest-value entries and the easiest to overlook. Before `Vobiz` and
-`Deepgram` were added, a live call transcribed the product name as *"boobies"* and *"Vobel"* —
-the two words the agent says most often were the two it understood worst. Add your own product,
-company and domain terms first.
+**Put your brand names in first.** Invented product and company names are out-of-vocabulary for any
+recogniser by definition — there is no pronunciation for them to have learned — and they are also
+the words a voice agent says most often, so a single keyterm entry pays for itself on every call.
+Adding `Vobiz` and `Deepgram` to the list measurably cleaned up our own transcripts. Add your
+product, company and domain terms before tuning anything else.
 
 Locale choice also affects recognition. `en-in` uses the monolingual `flux-general-en`, which has
 tighter end-of-turn behaviour than `flux-general-multi`; `hi-in` trades a little of that for
@@ -133,8 +137,8 @@ callers actually mix languages.
 
 ## Audio framing
 
-Deepgram delivers output audio in chunks of its own choosing — usually exact multiples of a frame,
-but the first and last of a turn rarely are. `VobizStream.play()` carries the remainder across
+Deepgram streams output audio in chunks sized for throughput — usually exact multiples of a frame,
+though the first and last of a turn naturally are not. `VobizStream.play()` carries the remainder across
 chunks so every `playAudio` frame is exactly 20 ms, and flushes the tail on `AgentAudioDone`.
 
 Vobiz recommends 20–60 ms chunks. Smaller chunks let `clearAudio` cancel more of the queued
