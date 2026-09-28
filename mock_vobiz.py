@@ -10,8 +10,9 @@ answers `checkpoint` with `playedStream`, notes `clearAudio`, then sends `stop`.
     python mock_vobiz.py --wav question.wav        # stream a real question at the agent
     python mock_vobiz.py --wav question.ulaw       # headerless, for the mulaw profile
 
-A pass means playAudio frames came back in the format the XML asked for. With silence in you are
-only testing the transport and the greeting; use --wav to exercise a full turn.
+A pass means playAudio frames came back at all -- the format is printed for you to read, not
+asserted. With silence in you are only testing the transport and the greeting; use --wav to
+exercise a full turn.
 """
 
 from __future__ import annotations

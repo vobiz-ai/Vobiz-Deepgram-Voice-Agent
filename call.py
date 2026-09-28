@@ -4,6 +4,7 @@ call.py — place an outbound Vobiz call into the Deepgram agent.
     python call.py                          # dial TO_NUMBER from .env
     python call.py --to +919XXXXXXXXX
     python call.py --host abc123.ngrok-free.app   # override PUBLIC_HOSTNAME
+    python call.py --dry-run                # print the payload without dialling
 
 Inbound calls need none of this — create a Voice Application pointing at
 https://PUBLIC_HOSTNAME/answer and attach a number to it. This is for dialling out.
@@ -37,16 +38,31 @@ def main() -> None:
                         help="a DID this account owns")
     parser.add_argument("--host", default=os.getenv("PUBLIC_HOSTNAME", ""),
                         help="public host running app.py, no scheme")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the payload and exit without placing a call")
     args = parser.parse_args()
 
     if not AUTH_ID or not AUTH_TOKEN:
         sys.exit("Set VOBIZ_AUTH_ID and VOBIZ_AUTH_TOKEN in .env")
-    if not args.to:
-        sys.exit("Set TO_NUMBER in .env or pass --to")
-    if not args.host or args.host.startswith("your-host"):
+    # The template ships these as +91XXXXXXXXXX, which is truthy -- so a bare
+    # `python call.py` straight after `cp .env.example .env` would otherwise post a
+    # placeholder to the live Call API and bill the attempt.
+    for label, value in (("TO_NUMBER/--to", args.to), ("FROM_NUMBER/--from", args.from_)):
+        if not value:
+            sys.exit(f"Set {label}")
+        if "X" in value.upper():
+            sys.exit(f"{label} is still the placeholder {value!r} -- set a real number")
+    if not args.host:
         sys.exit("Set PUBLIC_HOSTNAME in .env or pass --host")
 
-    base = f"https://{args.host.rstrip('/')}"
+    # Normalise exactly as app.py does, so the same .env works for both. Without
+    # this a PUBLIC_HOSTNAME of "https://host" builds "https://https://host/answer",
+    # which the API accepts and the call then dies on.
+    host = args.host.removeprefix("https://").removeprefix("http://").rstrip("/")
+    if "/" in host:
+        sys.exit(f"PUBLIC_HOSTNAME must be a bare hostname, got {args.host!r}")
+
+    base = f"https://{host}"
     payload = {
         "from": args.from_,
         "to": args.to,
@@ -56,6 +72,9 @@ def main() -> None:
         "hangup_method": "POST",
     }
     print(json.dumps(payload, indent=2))
+    if args.dry_run:
+        print("\n--dry-run: nothing was dialled.")
+        return
 
     response = requests.post(
         f"{API_BASE}/Account/{AUTH_ID}/Call/",
