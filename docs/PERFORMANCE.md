@@ -92,7 +92,7 @@ interrupts itself.
 
 ## Why every locale replies in English
 
-Recognition covers nine Indian languages — Flux STT Multilingual understands Hindi; Nova-3 adds
+Recognition covers ten Indian languages — Flux STT Multilingual understands Hindi, and Nova-3 adds
 Tamil, Telugu, Marathi, Bengali, Gujarati, Punjabi, Kannada, Assamese and Urdu — and the voices
 built for this audience are Indian-accented English. Pairing the two is what this agent does:
 understand whatever the caller speaks, answer in Indian-accented English.
@@ -162,8 +162,10 @@ reported when the stream ends:
 [call] turns never confirmed played: ['turn-1', 'turn-2']
 ```
 
-On a call with barge-ins that output is expected — interrupted turns genuinely never reached the
-caller.
+A barge-in *clears* this list rather than adding to it: Vobiz voids any checkpoint whose audio was
+still queued when the flush happened, so those turns can never be confirmed and tracking them would
+only produce noise. What the list does catch is a turn that was fully sent, never interrupted, and
+still never acknowledged — which points at audio dropped by the media server.
 
 ## Region
 

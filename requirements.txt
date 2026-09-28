@@ -1,7 +1,9 @@
-fastapi
-uvicorn[standard]
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30
 deepgram-sdk>=7.7.0
 python-dotenv
-python-multipart
-websockets
+# Pinned below 18: deepgram-sdk still imports websockets.legacy, which was
+# deprecated in 14.0. When it is removed, every agent connect fails on the
+# extra_headers/additional_headers rename.
+websockets<18
 requests

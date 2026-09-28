@@ -13,21 +13,6 @@ turn-taking.
 Out of the box it uses Deepgram's India region, an Indian-accented voice, and a keyterm list
 tuned for Indian vocabulary.
 
-> **Want background ambience or a faster speaking voice?** Those live on the
-> [`office-ambience`](https://github.com/vobiz-ai/Vobiz-Deepgram-Voice-Agent/tree/office-ambience)
-> branch. It adds `TTS_SPEED` for the speaking rate, and `AMBIENCE=office` to mix a
-> continuous office bed behind the agent so the caller hears a room rather than a
-> silent void — which on a phone call is most of what makes an agent sound synthetic.
-> Enabling the bed changes how audio is paced, so it is kept off `main` deliberately.
->
-> ```bash
-> git checkout office-ambience
-> # then in .env:
-> #   TTS_SPEED=1.2
-> #   AMBIENCE=office
-> #   AMBIENCE_LEVEL=0.06
-> ```
-
 ## Architecture
 
 ```mermaid
@@ -123,6 +108,10 @@ python app.py
 `GET /health` echoes the resolved region, models, voice and audio profile so you can confirm what
 is actually in use.
 
+> **Before you share that tunnel URL, set `STREAM_SECRET`.** An accepted `/media` socket opens a
+> billed Deepgram session on your key, so while the secret is unset anyone who learns the hostname
+> can start one. `openssl rand -hex 16` is enough. See [Security](#security).
+
 ## Inbound Calls
 
 Vobiz decides what to do with an inbound call by looking up the **Voice Application** attached to
@@ -151,7 +140,10 @@ should hear the greeting.
 
 ```bash
 python call.py --to +919XXXXXXXXX
+python call.py --dry-run              # print the payload without dialling
 ```
+
+`--from` overrides `FROM_NUMBER` and `--host` overrides `PUBLIC_HOSTNAME` for a one-off call.
 
 ## Endpoints
 
@@ -332,7 +324,7 @@ Vobiz wants for responsive barge-in.
 `app.py`, answers `checkpoint` with `playedStream`, and reports what came back.
 
 ```bash
-python mock_vobiz.py                        # 5s of silence — transport and greeting
+python mock_vobiz.py                        # 4s of silence — transport and greeting
 python mock_vobiz.py --wav question.wav     # stream a real question
 ```
 

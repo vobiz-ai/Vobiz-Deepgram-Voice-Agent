@@ -50,6 +50,7 @@ from deepgram.core.api_error import ApiError
 from deepgram.environment import DeepgramClientEnvironment
 from deepgram.agent.v1 import (
     AgentV1AgentAudioDone,
+    AgentV1FunctionCallRequest,
     AgentV1ConversationText,
     AgentV1Error,
     AgentV1LatencyReport,
@@ -58,6 +59,8 @@ from deepgram.agent.v1 import (
     AgentV1UserStartedSpeaking,
     AgentV1Warning,
     AgentV1Welcome,
+    ConversationHistoryMessage,
+    FunctionCallHistoryMessage,
 )
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
@@ -173,7 +176,7 @@ FRAME_MS = 20
 # acknowledges a flush in milliseconds on a healthy stream, so this only ever fires
 # when something has gone wrong -- and when it does, a clipped word beats an agent
 # that has gone silent for the rest of the call.
-CLEAR_ACK_TIMEOUT_S = float(os.getenv("CLEAR_ACK_TIMEOUT_S", "1.0"))
+CLEAR_ACK_TIMEOUT_S = float(_optional("CLEAR_ACK_TIMEOUT_S", "1.0"))
 
 AUDIO_PROFILES = {
     # Matches the PSTN leg exactly, both directions. Deepgram resamples internally
@@ -245,14 +248,15 @@ DG_ENVIRONMENT = (
 # speech, and matching those two is what these profiles do:
 #
 #   listening  Flux multilingual covers Hindi, and Nova-3 adds Tamil, Telugu,
-#              Marathi, Bengali, Gujarati and Punjabi. Good coverage.
+#              Marathi, Bengali, Gujarati, Punjabi, Kannada, Assamese and Urdu.
+#              Good coverage.
 #   speaking   Indian-accented ENGLISH in Flux TTS -- meena, naveen and priya --
 #              and for an Indian caller that accent matters more than most people
 #              expect.
 #
 # So the agent understands the caller in their language and answers in English. That
 # is how Indian support desks already work, and the hi-IN profile below leans into
-# it: understand whatever the caller speaks, answer in Hinglish rendered by an
+# it: understand whatever the caller speaks, answer in English rendered by an
 # Indian-accented voice.
 @dataclass(frozen=True)
 class LocaleProfile:
@@ -297,12 +301,12 @@ _HEARS_HINDI = (
     "in English."
 )
 
-# Indian conversational vocabulary that a general English model mishears. Flux v2
-# accepts keyterms to raise recall on exactly this kind of domain noun, and on a
-# support line these are the words that actually carry the caller's intent.
+# Indian conversational vocabulary specific to this deployment. Flux v2 accepts
+# keyterms to raise recall on exactly this kind of domain noun, and on a support
+# line these are the words that actually carry the caller's intent.
 INDIA_KEYTERMS = [
-    # The two names the agent says most often, and the two Flux mangles worst
-    # without help -- on a live call "Vobiz" came back as "boobies" and "Vobel".
+    # The two names the agent says most often, and both are invented words --
+    # out-of-vocabulary for any recogniser until they are listed here.
     "Vobiz", "Deepgram",
     "Aadhaar", "UPI", "PAN card", "GST", "IFSC", "RuPay", "Paytm", "PhonePe",
     "lakh", "crore", "rupees", "PIN code", "KYC", "OTP", "SIM", "recharge",
@@ -394,6 +398,16 @@ LOCALE = LOCALES[AGENT_LOCALE]
 DG_STT_MODEL = LOCALE.stt_model
 DG_TTS_MODEL = _optional("DG_TTS_MODEL", LOCALE.tts_model)
 
+# Model names are typed loosely enough that anything passes validation and fails
+# on the first real call instead. The sharp edge is an Aura voice: speak is pinned
+# to v2 below, and v2 rejects Aura models, so aura-2-thalia-en would start cleanly
+# and then drop the first caller. Catch it here, where the message can say why.
+if not DG_TTS_MODEL.startswith("flux-"):
+    raise SystemExit(
+        f"DG_TTS_MODEL must be a flux-* voice -- speak is pinned to the v2 endpoint, "
+        f"which does not accept Aura models -- got {DG_TTS_MODEL!r}"
+    )
+
 # --- The language model, which is where the latency actually lives -------------
 # Deepgram's own LatencyReport settles this. Measured on a live call, the stages
 # came out: recognition a few hundred ms, synthesis 43-103 ms, and time-to-first
@@ -424,6 +438,16 @@ DG_TTS_MODEL = _optional("DG_TTS_MODEL", LOCALE.tts_model)
 LLM_PROVIDER = _optional("LLM_PROVIDER", "anthropic")
 LLM_MODEL = _optional("LLM_MODEL", "claude-haiku-4-5")
 
+# The SDK types provider `type` as a strict Literal, so a plausible typo like
+# "openai" for "open_ai" fails deep inside pydantic at import -- a wall of
+# validation errors that prints the whole settings payload, prompt included.
+# Every other setting in this file fails with one sentence; make this one match.
+LLM_PROVIDERS = ("anthropic", "open_ai", "google", "nvidia", "groq", "aws_bedrock")
+if LLM_PROVIDER not in LLM_PROVIDERS:
+    raise SystemExit(
+        f"LLM_PROVIDER must be one of {', '.join(LLM_PROVIDERS)}, got {LLM_PROVIDER!r}"
+    )
+
 GREETING = _optional("GREETING", LOCALE.greeting)
 PROMPT = LOCALE.prompt
 
@@ -433,7 +457,7 @@ PROMPT = LOCALE.prompt
 # single biggest lever on how the agent feels. Both knobs live on the listen
 # provider, not on the agent:
 #
-#   EOT_THRESHOLD    confidence required to end a turn (0.5-0.9, Deepgram default
+#   EOT_THRESHOLD    confidence required to end a turn (0.5-1.0, Deepgram default
 #                    0.7). Raise it on a noisy or low-bitrate leg so background
 #                    speech and crosstalk are less likely to be read as the caller
 #                    taking a turn; lower it for a snappier agent on a clean line.
@@ -464,14 +488,13 @@ if EAGER_EOT_THRESHOLD and not 0.3 <= EAGER_EOT_THRESHOLD <= 0.9:
     raise SystemExit(
         f"EAGER_EOT_THRESHOLD must be 0 (off) or between 0.3 and 0.9, got {EAGER_EOT_THRESHOLD}"
     )
-# The API reference gives the range as 0.5-1.0; the SDK docstring says 0.5-0.9.
-# Trust the API reference, and stay well inside both by default.
+# Range per the API reference: 0.5-1.0. The default stays well inside it.
 if not 0.5 <= EOT_THRESHOLD <= 1.0:
     raise SystemExit(f"EOT_THRESHOLD must be between 0.5 and 1.0, got {EOT_THRESHOLD}")
 
 # Both Flux models are served from v2 endpoints, so each provider pins version="v2".
-# Drop it and the provider silently falls back to v1 -- Nova for listen, Aura for
-# speak -- where neither Flux model name is valid.
+# Drop it and the provider defaults to v1 -- Nova for listen, Aura for speak --
+# where neither Flux model name is valid.
 #
 # agent.language is deliberately absent: Deepgram deprecated it in favour of
 # per-provider language settings, and the Flux v2 listen provider does not take a
@@ -604,8 +627,10 @@ class VobizStream:
         self.unheard: set[str] = set()
         self._pending = b""          # partial frame carried between chunks
         self._awaiting_clear = False  # a clearAudio flush is in flight
+        self._clears_in_flight = 0   # how many, so a second barge-in is not lost
         self._held = b""             # audio that arrived during that flush
         self._clear_sent_at = 0.0    # when, so the wait cannot last forever
+        self._deferred_checkpoint = False  # a turn ended while a flush was in flight
         # Two coroutines reach this object: pump_agent, for audio arriving from
         # Deepgram, and the media() loop, which releases held audio on clearedAudio.
         # Serialise them so frames cannot interleave or overtake each other.
@@ -668,6 +693,7 @@ class VobizStream:
             if (asyncio.get_running_loop().time() - self._clear_sent_at) > CLEAR_ACK_TIMEOUT_S:
                 print("[call] clearedAudio never arrived -- resuming playback anyway")
                 self._awaiting_clear = False
+                self._clears_in_flight = 0
                 audio = self._held + audio
                 self._held = b""
             else:
@@ -696,6 +722,11 @@ class VobizStream:
             await self._flush()
 
     async def _flush(self) -> None:
+        # Deferring matters less here than in _play -- _pending is empty during a
+        # flush because _clear() dropped it -- but sending anything mid-flush is
+        # exactly what the gating exists to prevent, so treat it the same way.
+        if self._awaiting_clear:
+            return
         if self.stream_id and self._pending:
             tail, self._pending = self._pending, b""
             await self._send(
@@ -728,7 +759,12 @@ class VobizStream:
         if not self.stream_id:
             return
         self._pending = b""
+        # Audio held for the turn being abandoned is stale too. Keeping it would
+        # release the interrupted reply into the next flush on the first ack.
+        self._held = b""
+        self._deferred_checkpoint = False
         self.unheard.clear()
+        self._clears_in_flight += 1
         self._awaiting_clear = True
         self._clear_sent_at = asyncio.get_running_loop().time()
         await self._send({"event": "clearAudio", "streamId": self.stream_id})
@@ -736,10 +772,19 @@ class VobizStream:
     async def cleared(self) -> None:
         """clearedAudio arrived: the flush is done, so release anything held back."""
         async with self._lock:
+            self._clears_in_flight = max(0, self._clears_in_flight - 1)
+            if self._clears_in_flight:
+                # A second barge-in landed before this ack. Keep holding: releasing
+                # now would send audio into a flush that is still in flight.
+                return
             self._awaiting_clear = False
             held, self._held = self._held, b""
             if held:
                 await self._play(held)
+            await self._flush()
+            if self._deferred_checkpoint:
+                self._deferred_checkpoint = False
+                await self._checkpoint()
 
     async def checkpoint(self) -> None:
         """Mark the end of a turn and remember it until Vobiz says it was played.
@@ -755,6 +800,11 @@ class VobizStream:
 
     async def _checkpoint(self) -> None:
         if not self.stream_id:
+            return
+        if self._awaiting_clear:
+            # The audio this marks is still held, so a checkpoint now would be
+            # acknowledged before the caller has heard anything. Wait for the ack.
+            self._deferred_checkpoint = True
             return
         self.turns += 1
         name = f"turn-{self.turns}"
@@ -775,15 +825,27 @@ async def pump_agent(stream: VobizStream, agent) -> None:
     barge-in flush. VobizStream serialises the two behind its own lock, so ordering
     is the stream's guarantee rather than a property of this task being alone.
     """
+    try:
+        await _relay(stream, agent)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        # Usually a normal close at end of call, but an expired key, an exhausted
+        # quota or a failed write to the Vobiz socket lands here too. Whatever the
+        # cause, this task is the only thing playing audio to the caller, so its
+        # death means silence -- end the call rather than leave them holding a live
+        # line that will never speak again.
+        print(f"[deepgram] relay ended: {type(exc).__name__}: {exc}")
+    try:
+        await stream.ws.close(code=1011)  # internal error
+    except Exception:
+        pass  # already closing, or already closed
+
+
+async def _relay(stream: VobizStream, agent) -> None:
+    """The receive-and-dispatch loop. Every exception is the caller's problem."""
     while True:
-        try:
-            message = await agent.recv()
-        except Exception as exc:
-            # Usually a normal close at end of call, but an expired key or an
-            # exhausted quota lands here too, and that is worth a line -- otherwise
-            # the only visible symptom is a call that goes quiet.
-            print(f"[deepgram] receive loop ended: {type(exc).__name__}: {exc}")
-            return
+        message = await agent.recv()
 
         if isinstance(message, bytes):
             await stream.play(message)
@@ -815,10 +877,30 @@ async def pump_agent(stream: VobizStream, agent) -> None:
                 print(f"[latency] {'  '.join(parts)}")
         elif isinstance(message, AgentV1ConversationText):
             print(f"[{message.role}] {message.content}")
-        elif isinstance(message, (AgentV1Welcome, AgentV1SettingsApplied)):
-            print(f"[deepgram] {type(message).__name__}")
+        elif isinstance(message, AgentV1Welcome):
+            # request_id is what Deepgram support asks for first, so log it next to
+            # the Vobiz call id that shares its lifetime.
+            print(f"[deepgram] Welcome request_id={message.request_id} call={stream.call_id}")
+        elif isinstance(message, AgentV1SettingsApplied):
+            print("[deepgram] SettingsApplied")
         elif isinstance(message, (AgentV1Error, AgentV1Warning)):
             print(f"[deepgram] {type(message).__name__}: {message}")
+        elif isinstance(message, AgentV1FunctionCallRequest):
+            # Nothing here configures functions, so this should not arrive. If it
+            # ever does, Deepgram is waiting for send_function_call_response() and
+            # the turn hangs until it gets one -- which on a call is an agent that
+            # simply stops talking. Say so loudly rather than dropping it.
+            print(
+                f"[deepgram] FunctionCallRequest received but no functions are "
+                f"configured -- the turn will hang: {message}"
+            )
+        elif isinstance(message, (ConversationHistoryMessage, FunctionCallHistoryMessage)):
+            pass  # same content ConversationText already printed
+        else:
+            # Anything the SDK does not model arrives as a raw dict, and anything it
+            # models but we do not handle would otherwise vanish. Neither should be
+            # invisible -- a dropped FunctionCallRequest, for one, hangs the turn.
+            print(f"[deepgram] unhandled event: {message!r}")
 
 
 # --- The media socket ----------------------------------------------------------
@@ -882,7 +964,11 @@ async def media(vobiz_ws: WebSocket, secret: str = "") -> None:
                         break
                     print(f"[call] started stream {stream.stream_id} (call {stream.call_id})")
                     # Sending settings is what starts the conversation, greeting included.
-                    await agent.send_settings(AGENT_SETTINGS)
+                    try:
+                        await agent.send_settings(AGENT_SETTINGS)
+                    except Exception as exc:
+                        print(f"[deepgram] could not send settings: {type(exc).__name__}: {exc}")
+                        break
 
                 elif event == "media":
                     if not stream.started:
@@ -894,7 +980,14 @@ async def media(vobiz_ws: WebSocket, secret: str = "") -> None:
                         audio = base64.b64decode(payload, validate=True)
                     except Exception:
                         continue
-                    await agent.send_media(audio)
+                    try:
+                        await agent.send_media(audio)
+                    except Exception as exc:
+                        # The agent socket died under us. Without this the loop keeps
+                        # writing to a dead socket and the failure escapes the
+                        # endpoint as a traceback instead of ending the call.
+                        print(f"[deepgram] agent socket closed mid-call: {type(exc).__name__}: {exc}")
+                        break
 
                 elif event == "playedStream":
                     name = message.get("name")
@@ -918,9 +1011,15 @@ async def media(vobiz_ws: WebSocket, secret: str = "") -> None:
                 print(f"[call] turns never confirmed played: {sorted(stream.unheard)}")
             if relay is not None:
                 relay.cancel()
-                # Collect it, so a write that lost a race with the closing socket is
-                # reported here instead of surfacing later as an orphaned task.
-                await asyncio.gather(relay, return_exceptions=True)
+                # Collect it, and actually look at what came back: a write that lost
+                # a race with the closing socket is reported here rather than being
+                # swallowed, which is how a permanently mute agent used to go
+                # unexplained in the log.
+                (outcome,) = await asyncio.gather(relay, return_exceptions=True)
+                if isinstance(outcome, BaseException) and not isinstance(
+                    outcome, asyncio.CancelledError
+                ):
+                    print(f"[deepgram] relay task died: {type(outcome).__name__}: {outcome}")
     finally:
         await connection.__aexit__(None, None, None)
 
