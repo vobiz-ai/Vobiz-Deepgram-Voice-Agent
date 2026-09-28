@@ -624,6 +624,7 @@ class VobizStream:
         self.ws = ws
         self.stream_id: str | None = None
         self.call_id: str | None = None
+        self.request_id: str | None = None  # Deepgram's, for support tickets
         self.started = False
         self.turns = 0
         self.unheard: set[str] = set()
@@ -880,9 +881,11 @@ async def _relay(stream: VobizStream, agent) -> None:
         elif isinstance(message, AgentV1ConversationText):
             print(f"[{message.role}] {message.content}")
         elif isinstance(message, AgentV1Welcome):
-            # request_id is what Deepgram support asks for first, so log it next to
-            # the Vobiz call id that shares its lifetime.
-            print(f"[deepgram] Welcome request_id={message.request_id} call={stream.call_id}")
+            # request_id is what Deepgram support asks for first. Welcome arrives
+            # before Vobiz's start event, so the call id is not known yet -- keep it
+            # and let the "started stream" line print the two together.
+            stream.request_id = message.request_id
+            print(f"[deepgram] Welcome request_id={message.request_id}")
         elif isinstance(message, AgentV1SettingsApplied):
             print("[deepgram] SettingsApplied")
         elif isinstance(message, (AgentV1Error, AgentV1Warning)):
@@ -1007,6 +1010,13 @@ async def media(vobiz_ws: WebSocket, secret: str = "") -> None:
         except WebSocketDisconnect:
             print("[call] caller hung up")
         finally:
+            # Both ids are known by now regardless of which arrived first, so this
+            # is the line to quote in a support ticket -- it pairs the Vobiz call
+            # with the Deepgram request that served it.
+            print(
+                f"[call] media session ended after {stream.turns} turn(s) "
+                f"(call {stream.call_id}, deepgram {stream.request_id})"
+            )
             if stream.unheard:
                 # The caller never confirmed hearing these turns, which is the
                 # signature of audio dropped at the media server.
