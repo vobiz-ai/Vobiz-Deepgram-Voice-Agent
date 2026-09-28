@@ -46,7 +46,6 @@ from html import escape
 from urllib.parse import parse_qsl
 
 from deepgram import AsyncDeepgramClient
-from deepgram.core.api_error import ApiError
 from deepgram.environment import DeepgramClientEnvironment
 from deepgram.agent.v1 import (
     AgentV1AgentAudioDone,
@@ -241,19 +240,20 @@ DG_ENVIRONMENT = (
 
 
 # --- Voice and language --------------------------------------------------------
-# Deepgram's Indian coverage pairs broad recognition with Indian-accented English
-# speech, and matching those two is what these profiles do:
+# Deepgram's Indic story is asymmetric, and the asymmetry decides what an Indian
+# deployment can actually do:
 #
 #   listening  Flux multilingual covers Hindi, and Nova-3 adds Tamil, Telugu,
 #              Marathi, Bengali, Gujarati and Punjabi. Good coverage.
-#   speaking   Indian-accented ENGLISH in Flux TTS -- meena, naveen and priya --
-#              and for an Indian caller that accent matters more than most people
-#              expect.
+#   speaking   there is no Hindi voice, and no Indic-language voice at all. What
+#              does exist is Indian-accented ENGLISH in Flux TTS -- meena, naveen
+#              and priya -- and for an Indian caller that accent matters more than
+#              most people expect.
 #
-# So the agent understands the caller in their language and answers in English. That
-# is how Indian support desks already work, and the hi-IN profile below leans into
-# it: understand whatever the caller speaks, answer in Hinglish rendered by an
-# Indian-accented voice.
+# So a Hindi-speaking agent can understand the caller but has to answer in English.
+# That is a real constraint, not a configuration mistake, and the hi-IN profile
+# below leans into it the way Indian support desks already do: understand whatever
+# the caller speaks, answer in Hinglish rendered by an Indian-accented voice.
 @dataclass(frozen=True)
 class LocaleProfile:
     """STT model, language hinting and a matching voice for one target audience."""
@@ -272,12 +272,13 @@ class LocaleProfile:
 #
 # The hard rule in all of them: ALWAYS ANSWER IN ENGLISH.
 #
-# These are English voice models, so romanised Hindi ("aapko kya chahiye") pushes
-# them out of distribution: the voice has to guess grapheme-to-phoneme on letter
-# sequences English never produces, which is slower to synthesise and rougher to
-# listen to. English text is both the faster and the better-sounding choice. The
-# Indian feel comes from the VOICE (naveen, meena and priya are Indian-accented)
-# and from English vocabulary a caller here expects -- not from Hindi text.
+# Deepgram has no Hindi or Indic voice. Every Flux TTS voice is an English model,
+# so feeding it romanised Hindi ("aapko kya chahiye") pushes it out of distribution:
+# it has to guess grapheme-to-phoneme on letter sequences English never produces,
+# which is slow to synthesise and comes out with broken prosody. Asking an English
+# model to fake Hindi degrades both latency and audio quality at once. The Indian
+# feel comes from the VOICE (naveen, meena, priya are Indian-accented) and from
+# English vocabulary a caller here expects -- never from Hindi text.
 _STYLE = (
     "Answer in English, always. One or two short spoken sentences. No lists or "
     "markdown."
@@ -606,10 +607,6 @@ class VobizStream:
         self._awaiting_clear = False  # a clearAudio flush is in flight
         self._held = b""             # audio that arrived during that flush
         self._clear_sent_at = 0.0    # when, so the wait cannot last forever
-        # Two coroutines reach this object: pump_agent, for audio arriving from
-        # Deepgram, and the media() loop, which releases held audio on clearedAudio.
-        # Serialise them so frames cannot interleave or overtake each other.
-        self._lock = asyncio.Lock()
 
     def read_start(self, message: dict) -> None:
         """Absorb the start event. Raises if it cannot be used to send audio."""
@@ -646,12 +643,7 @@ class VobizStream:
         await self.ws.send_text(json.dumps(payload))
 
     async def play(self, audio: bytes) -> None:
-        """Queue agent audio for the caller, holding the socket for the whole batch."""
-        async with self._lock:
-            await self._play(audio)
-
-    async def _play(self, audio: bytes) -> None:
-        """Emit audio as 20 ms playAudio frames. Caller must hold the lock.
+        """Queue agent audio for the caller as 20 ms playAudio frames.
 
         Deepgram hands over chunks on its own schedule -- mostly exact multiples of
         a frame, but the first and last of a turn rarely are. Carrying the remainder
@@ -692,10 +684,6 @@ class VobizStream:
 
     async def flush(self) -> None:
         """Emit any partial frame held back by play(), at the end of a turn."""
-        async with self._lock:
-            await self._flush()
-
-    async def _flush(self) -> None:
         if self.stream_id and self._pending:
             tail, self._pending = self._pending, b""
             await self._send(
@@ -721,10 +709,6 @@ class VobizStream:
         with them the checkpoints that will now never be acknowledged -- Vobiz voids
         any checkpoint whose audio was still queued when the flush happened.
         """
-        async with self._lock:
-            await self._clear()
-
-    async def _clear(self) -> None:
         if not self.stream_id:
             return
         self._pending = b""
@@ -735,11 +719,10 @@ class VobizStream:
 
     async def cleared(self) -> None:
         """clearedAudio arrived: the flush is done, so release anything held back."""
-        async with self._lock:
-            self._awaiting_clear = False
-            held, self._held = self._held, b""
-            if held:
-                await self._play(held)
+        self._awaiting_clear = False
+        held, self._held = self._held, b""
+        if held:
+            await self.play(held)
 
     async def checkpoint(self) -> None:
         """Mark the end of a turn and remember it until Vobiz says it was played.
@@ -750,10 +733,6 @@ class VobizStream:
         actually reached the caller, so track what is outstanding and report anything
         still unplayed when the stream ends.
         """
-        async with self._lock:
-            await self._checkpoint()
-
-    async def _checkpoint(self) -> None:
         if not self.stream_id:
             return
         self.turns += 1
@@ -770,10 +749,9 @@ async def pump_agent(stream: VobizStream, agent) -> None:
     """Relay one Deepgram agent connection onto the Vobiz socket.
 
     Output audio arrives as raw bytes; everything else arrives as a typed event.
-    This is the main writer to the Vobiz socket, but not the only one: the media()
-    loop also sends, via VobizStream.cleared(), when it releases audio held during a
-    barge-in flush. VobizStream serialises the two behind its own lock, so ordering
-    is the stream's guarantee rather than a property of this task being alone.
+    This is the only writer to the Vobiz socket, which is what keeps playAudio and
+    clearAudio correctly ordered without any locking -- worth preserving if anything
+    else ever needs to send a frame.
     """
     while True:
         try:
@@ -841,24 +819,7 @@ async def media(vobiz_ws: WebSocket, secret: str = "") -> None:
     stream = VobizStream(vobiz_ws)
     relay: asyncio.Task | None = None
 
-    # Entered by hand rather than with `async with`, because a rejected key raises
-    # right here -- and the Vobiz socket is already accepted by this point. Letting
-    # that exception escape leaves the caller listening to silence until they give up
-    # and hang up, so close the socket deliberately instead.
-    connection = dg_client.agent.v1.connect()
-    try:
-        agent = await connection.__aenter__()
-    except ApiError as exc:
-        # The SDK redacts the key in its own error text, so this is safe to print.
-        print(f"[deepgram] connect rejected: HTTP {exc.status_code} -- check DEEPGRAM_API_KEY")
-        await vobiz_ws.close(code=1011)  # internal error
-        return
-    except Exception as exc:
-        print(f"[deepgram] connect failed: {type(exc).__name__}: {exc}")
-        await vobiz_ws.close(code=1011)
-        return
-
-    try:
+    async with dg_client.agent.v1.connect() as agent:
         relay = asyncio.create_task(pump_agent(stream, agent))
         try:
             async for raw in vobiz_ws.iter_text():
@@ -921,8 +882,6 @@ async def media(vobiz_ws: WebSocket, secret: str = "") -> None:
                 # Collect it, so a write that lost a race with the closing socket is
                 # reported here instead of surfacing later as an orphaned task.
                 await asyncio.gather(relay, return_exceptions=True)
-    finally:
-        await connection.__aexit__(None, None, None)
 
 
 # --- HTTP surface --------------------------------------------------------------

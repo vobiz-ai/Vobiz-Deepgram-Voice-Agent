@@ -93,7 +93,7 @@ Deeper detail on region choice, model selection and turn-taking is in
 
 ## Quick Start
 
-Requires **Python 3.10 or later** — `deepgram-sdk` 7.x declares `Requires-Python >=3.10`, so the `pip install` below is the first thing that fails on 3.9.
+Requires **Python 3.9 or later**.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -165,13 +165,11 @@ python call.py --to +919XXXXXXXXX
 
 ## Language and Voice
 
-Deepgram's Indian-language recognition is broad: Flux STT Multilingual understands Hindi, and
-Nova-3 adds Tamil, Telugu, Marathi, Bengali, Gujarati, Punjabi, Kannada, Assamese and Urdu. On the
-speech side, the models built for this audience are Deepgram's **Indian-accented English voices** —
-so the design that gets the most out of the stack is to understand the caller in their language and
-answer in Indian-accented English. That is what every locale below does.
+Deepgram listens in far more Indian languages than it can speak. Flux Multilingual understands
+Hindi, and Nova-3 adds Tamil, Telugu, Marathi, Bengali, Gujarati, Punjabi, Kannada, Assamese and
+Urdu — but there is **no Indic-language voice**. Every Flux TTS voice is an English model.
 
-The voices:
+What does exist is Indian-accented English:
 
 | Voice | |
 |---|---|
@@ -179,10 +177,9 @@ The voices:
 | `flux-priya-en` | female — IVR, confident and reassuring |
 | `flux-naveen-en` | male — IVR, support, informative |
 
-So **every locale replies in English**, and the Indian character comes from the voice — which, on a
-call, is what carries it. Set `DG_TTS_MODEL` to pick a different one. Keep replies in English rather
-than romanised Hindi: these are English voice models, and we measured what happens when you don't —
-see [docs/PERFORMANCE.md](docs/PERFORMANCE.md#why-every-locale-replies-in-english).
+So **every locale replies in English**, and the Indian character comes from the voice. Set
+`DG_TTS_MODEL` to change it. Feeding an English voice model romanised Hindi makes synthesis slow
+and the audio broken — see [docs/PERFORMANCE.md](docs/PERFORMANCE.md#why-every-locale-replies-in-english).
 
 | `AGENT_LOCALE` | Understands | Replies in |
 |---|---|---|
@@ -191,14 +188,13 @@ see [docs/PERFORMANCE.md](docs/PERFORMANCE.md#why-every-locale-replies-in-englis
 | `indic` | one Indic language (set `INDIC_LANGUAGE`) | English, Indian accent |
 | `en-us` | English | English, American accent |
 
-`en-in` is the default because the monolingual Flux model has the tightest end-of-turn behaviour.
-Use `hi-in` when callers code-switch. The `indic` locale reaches nine more languages through Nova,
-which brings its own endpointing rather than Flux's — a fair trade when you need that coverage.
+`en-in` is the default because the monolingual Flux model has tighter end-of-turn behaviour. Use
+`hi-in` when callers code-switch. The `indic` locale is slower — Nova is a v1 provider, so it
+forgoes Flux's end-of-turn detection.
 
 Recognition is biased toward Indian vocabulary with a keyterm list — Aadhaar, UPI, PAN card, GST,
 IFSC, RuPay, lakh, crore, KYC, OTP and major city names. Edit `INDIA_KEYTERMS` in `app.py` to add
-your own product and domain words. Brand names repay this the most: an invented name is
-out-of-vocabulary for any recogniser, and it is the word your agent says most often.
+your own product and domain words; brand names are the ones most often misheard.
 
 ## Configuration
 
@@ -301,9 +297,8 @@ never resamples.
 `<Stream contentType>` — that attribute configures the *inbound* direction, which tops out at
 16 kHz. 24 kHz is outbound-only.
 
-Deepgram streams audio in chunks sized for throughput. `VobizStream.play()` re-slices them so every
-frame sent is exactly 20 ms — 160 bytes mu-law at 8 kHz, 960 bytes L16 at 24 kHz — which is what
-Vobiz wants for responsive barge-in.
+Deepgram delivers audio in chunks of its own choosing. `VobizStream.play()` re-slices them so
+every frame sent is exactly 20 ms — 160 bytes mu-law at 8 kHz, 960 bytes L16 at 24 kHz.
 
 ## XML Elements Used
 
@@ -338,19 +333,9 @@ python mock_vobiz.py --wav question.wav     # stream a real question
 
 It reports `PASS` whenever `playAudio` frames were returned, and prints the formats, frame count,
 checkpoints and time-to-first-audio for you to read. It does not assert that the format matches
-what the XML requested, so read the printed output rather than relying on the exit code.
-
-`--wav` takes audio that already matches the profile, because nothing in the mock resamples or
-transcodes — the encoding, channel count and sample rate are read from the RIFF header and a
-mismatch is refused with the `ffmpeg` line that would fix it:
-
-| `AUDIO_MODE` | Expected file |
-| --- | --- |
-| `mulaw` (default) | mu-law WAV, mono, 8 kHz — `ffmpeg -i in.wav -ar 8000 -ac 1 -c:a pcm_mulaw out.wav` |
-| `l16` | 16-bit PCM WAV, mono, 16 kHz — `ffmpeg -i in.wav -ar 16000 -ac 1 -c:a pcm_s16le out.wav` |
-
-A headerless `.ulaw`, `.raw`, `.pcm` or `.l16` file is also accepted and taken on trust, since
-there is no header to check it against.
+what the XML requested, so read the printed output rather than relying on the exit code. Two
+limits worth knowing: `--wav` needs 8-bit mono for the `mulaw` profile, and the file's sample rate
+is not checked against the profile.
 
 ## Notes
 
@@ -374,37 +359,6 @@ Five behaviours are worth knowing before changing anything:
   next reply starting mid-word. Audio arriving during a flush is held and released on the
   acknowledgement, with `CLEAR_ACK_TIMEOUT_S` as a backstop.
 
-## Security
-
-Three separate mechanisms, guarding two different doors.
-
-| | Protects | Set by |
-| --- | --- | --- |
-| `VERIFY_SIGNATURE` | the three HTTP webhooks | `VOBIZ_AUTH_TOKEN`, plus callback auth credentials on the URL in the console |
-| `STREAM_SECRET` | the `/media` WebSocket | a random value in `.env`, checked before `accept()` |
-| TLS | everything | your tunnel or load balancer |
-
-**What the webhook signature proves.** That the request was made by someone holding your account
-auth token, for that exact URL. It is HMAC-SHA256 over `baseURL + nonce` (V2) or
-`baseURL + "." + nonce` (V3), compared in constant time.
-
-**What it does not prove — read this before relying on it.** Vobiz sends a random nonce and *no
-timestamp*, and the signature does not cover the request body. So:
-
-- **A captured request verifies forever.** There is nothing in the signed material to check
-  freshness against, so anyone who records one signed `/answer` request off the wire can replay it
-  indefinitely. Rate-limit and monitor `/answer` if that matters to you; the signature will not
-  stop it.
-- **The body is unsigned.** Every form field — `CallUUID`, `From`, `To` — is attacker-controllable
-  on a replayed or forged request. Do not use webhook parameters as an authorisation decision.
-- **Signature headers only appear when the callback URL has auth credentials configured** in the
-  Vobiz console. That is why `VERIFY_SIGNATURE` is opt-in rather than on by default: turning it on
-  without configuring them 403s every call. The log distinguishes the two cases.
-
-`STREAM_SECRET` is the stronger of the two, and it is why the secret rides in the WebSocket path:
-`extraHeaders` never reaches the socket (see [Notes](#notes)), so the path is the only place the
-media server can carry a credential. Rotating it is a one-line `.env` change and a restart.
-
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -412,11 +366,11 @@ media server can carry a credential. Rotating it is a one-line `.env` change and
 | Call hangs up immediately, log shows *End Of XML Instructions* | `keepCallAlive="true"` missing, or `audioTrack="both"` with `bidirectional="true"` |
 | Silence in both directions | `bidirectional="true"` missing — `playAudio` is ignored on a one-way stream |
 | Garbled or chipmunk audio | `<Stream contentType>` and `AUDIO_MODE` disagree. The app prints `[audio] WARNING` on the start event when the reported `mediaFormat` does not match |
-| Speech sounds slow, stretched or broken | The voice is being given non-English text. Flux voices are English models, so keep replies in English and let the Indian character come from the voice itself |
+| Speech sounds slow, stretched or broken | The voice is being given non-English text. Every Flux voice is an English model — keep replies in English and let the accent come from the voice |
 | Replies feel sluggish | Read the `[latency]` line to see which stage is responsible, then change `LLM_MODEL` if the language model dominates |
 | Agent talks over the caller | `clearAudio` is not reaching Vobiz — check `streamId` is set before the first `playAudio` |
 | Agent cuts the caller off mid-sentence | `EOT_THRESHOLD` too low for the line, or `EOT_TIMEOUT_MS` too short. Raise both |
-| Brand or domain words need a hint | Add them to `INDIA_KEYTERMS` in `app.py` — that is exactly what keyterms are for |
+| Brand or domain words mistranscribed | Add them to `INDIA_KEYTERMS` in `app.py` |
 | WebSocket closes with 1008 | `STREAM_SECRET` does not match the secret in the stream URL path |
 | Startup exits with *STREAM_SECRET must be ASCII alphanumeric* | The secret becomes a URL path segment and is compared byte-wise; a non-ASCII character would make every call fail |
 | `/answer` returns 403 | `VERIFY_SIGNATURE=true` but the callback URL has no auth credentials configured, so no signature headers are sent. The log distinguishes this from a genuine mismatch |
