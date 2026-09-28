@@ -442,7 +442,9 @@ LLM_MODEL = _optional("LLM_MODEL", "claude-haiku-4-5")
 # "openai" for "open_ai" fails deep inside pydantic at import -- a wall of
 # validation errors that prints the whole settings payload, prompt included.
 # Every other setting in this file fails with one sentence; make this one match.
-LLM_PROVIDERS = ("anthropic", "open_ai", "google", "nvidia", "groq", "aws_bedrock")
+# Taken from the SDK's own provider union, not from memory: anthropic, open_ai,
+# google, groq, aws_bedrock. There is no nvidia provider, despite older docs.
+LLM_PROVIDERS = ("anthropic", "open_ai", "google", "groq", "aws_bedrock")
 if LLM_PROVIDER not in LLM_PROVIDERS:
     raise SystemExit(
         f"LLM_PROVIDER must be one of {', '.join(LLM_PROVIDERS)}, got {LLM_PROVIDER!r}"

@@ -1,6 +1,7 @@
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30
-deepgram-sdk>=7.7.0
+# Verified end to end against 7.8.1 and 7.11.0.
+deepgram-sdk>=7.8.1,<8
 python-dotenv
 # Pinned below 18: deepgram-sdk still imports websockets.legacy, which was
 # deprecated in 14.0. When it is removed, every agent connect fails on the

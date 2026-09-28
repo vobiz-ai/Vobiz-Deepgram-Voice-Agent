@@ -215,7 +215,7 @@ out-of-vocabulary for any recogniser, and it is the word your agent says most of
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `anthropic` | `anthropic`, `open_ai`, `google`, `nvidia` |
+| `LLM_PROVIDER` | `anthropic` | `anthropic`, `open_ai`, `google`, `groq`, `aws_bedrock` |
 | `LLM_MODEL` | `claude-haiku-4-5` | Chosen for response speed and consistency on a voice call |
 
 **Turn-taking** — Flux only; the `indic` locale uses Nova, which does its own endpointing
