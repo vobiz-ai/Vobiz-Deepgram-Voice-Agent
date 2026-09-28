@@ -108,6 +108,24 @@ python app.py
 `GET /health` echoes the resolved region, models, voice and audio profile so you can confirm what
 is actually in use.
 
+### Docker
+
+The image needs no `.env` — configuration is passed in, and `.dockerignore` keeps `.env` out of
+the build context so a real key can never be baked into a layer:
+
+```bash
+docker build -t vobiz-deepgram .
+docker run --rm -p 5050:8080 \
+  -e DEEPGRAM_API_KEY=your_key \
+  -e PUBLIC_HOSTNAME=your-tunnel-host \
+  -e STREAM_SECRET=$(openssl rand -hex 16) \
+  vobiz-deepgram
+```
+
+It listens on `8080` inside the container and binds `0.0.0.0`, because the container's loopback is
+not reachable from outside it — map it to whatever your tunnel points at. `PORT` overrides the
+internal port for platforms that assign one.
+
 > **Before you share that tunnel URL, set `STREAM_SECRET`.** An accepted `/media` socket opens a
 > billed Deepgram session on your key, so while the secret is unset anyone who learns the hostname
 > can start one. `openssl rand -hex 16` is enough. See [Security](#security).
