@@ -159,9 +159,14 @@ should hear the greeting.
 ```bash
 python call.py --to +919XXXXXXXXX
 python call.py --dry-run              # print the payload without dialling
+python call.py --machine-detection off   # let a voicemail or IVR through
 ```
 
 `--from` overrides `FROM_NUMBER` and `--host` overrides `PUBLIC_HOSTNAME` for a one-off call.
+
+**Answering machines.** `call.py` sends `machine_detection=hangup` by default, so a call picked up by voicemail ends with hangup cause `9100 Machine Detected` instead of the agent holding a conversation with the mailbox prompt until the mailbox gives up. `--machine-detection true` detects but keeps the call up; `off` omits the parameter. For a decision mid-call rather than a hangup, Vobiz can also post the result to a `machine_detection_url` — see the [machine detection docs](https://www.vobiz.ai/docs/call/machine-detection).
+
+**US caller ID reputation.** A freshly rented US number has no calling history, and some US carriers send its calls straight to voicemail or label them as spam. If your own phone never rings, look at the CDR before suspecting the code: a leg answered after two or three seconds of ring and billed for a minute or more is voicemail, and hangup cause `3130 Spam block` is the explicit version. Use a number that has carried traffic for a while before judging answer rates.
 
 ## Endpoints
 
@@ -269,6 +274,7 @@ out-of-vocabulary for any recogniser, and it is the word your agent says most of
 | `VOBIZ_AUTH_TOKEN` | Vobiz auth token; also the webhook signing key |
 | `FROM_NUMBER` | A DID this account owns |
 | `TO_NUMBER` | Default destination for `call.py` |
+| `MACHINE_DETECTION` | `hangup` (default), `true` or `off` — see **Outbound Calls** |
 
 ## India vs global
 
@@ -432,6 +438,8 @@ media server can carry a credential. Rotating it is a one-line `.env` change and
 | `/answer` returns 403 | `VERIFY_SIGNATURE=true` but the callback URL has no auth credentials configured, so no signature headers are sent. The log distinguishes this from a genuine mismatch |
 | Startup exits naming `PUBLIC_HOSTNAME` | It is unset, still the placeholder, or contains a path |
 | Outbound call returns 401 or 402 | `401` credentials, `402` balance. *"from number … not owned"* means the DID belongs to another account |
+| Outbound call ends with *Machine Detected* (9100) | Voicemail or an IVR answered and `machine_detection=hangup` dropped it. Pass `--machine-detection off` to talk to it anyway |
+| Outbound call rings for two seconds, then voicemail | The destination carrier is screening the caller ID, usually a new US number. See **Outbound Calls** |
 | Inbound call is never answered | The number has no Voice Application attached, or its answer URL does not point at this server |
 | Inbound call does not connect | Dial the number with a `0` or `+91` prefix |
 

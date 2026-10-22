@@ -628,6 +628,7 @@ class VobizStream:
         self.started = False
         self.turns = 0
         self.unheard: set[str] = set()
+        self.latency: dict[str, float] = {}  # LatencyReport fields, merged per turn
         self._pending = b""          # partial frame carried between chunks
         self._awaiting_clear = False  # a clearAudio flush is in flight
         self._clears_in_flight = 0   # how many, so a second barge-in is not lost
@@ -861,23 +862,29 @@ async def _relay(stream: VobizStream, agent) -> None:
             await stream.checkpoint()
         elif isinstance(message, AgentV1LatencyReport):
             # Deepgram's own per-turn breakdown, and the only way to tell whether a
-            # slow reply is recognition, the language model or synthesis. Every
-            # field is optional, so read defensively.
-            parts = [
-                f"{label}={value * 1000:.0f}ms"
-                for label, value in (
-                    ("stt", message.stt_latency),
-                    ("llm_first_token", message.ttt_text_latency),
-                    ("tts", message.tts_latency),
-                    ("total", message.total_latency),
-                )
-                if value is not None
-            ]
-            # Deepgram emits a report per recognition segment as well as per turn.
-            # Only the turn-level one carries total_latency, and only that one is
-            # worth a line -- the rest arrive tens of times per turn.
-            if parts and message.total_latency is not None:
-                print(f"[latency] {'  '.join(parts)}")
+            # slow reply is recognition, the language model or synthesis. The
+            # fields do not arrive together: each comes in its own LatencyReport.
+            # stt_latency lands once per recognition segment, tens of times a
+            # turn; then ttt_*, tts_latency and total_latency follow in quick
+            # succession once the reply starts. Printing only the report that
+            # carries total_latency, as this once did, therefore shows "total="
+            # on its own. Merge them per turn and print when total arrives,
+            # keeping the last stt value seen.
+            for field, value in (
+                ("stt", message.stt_latency),
+                ("llm_first_token", message.ttt_text_latency),
+                ("tts", message.tts_latency),
+                ("total", message.total_latency),
+            ):
+                if value is not None:
+                    stream.latency[field] = value
+            if message.total_latency is not None:
+                print("[latency] " + "  ".join(
+                    f"{field}={stream.latency[field] * 1000:.0f}ms"
+                    for field in ("stt", "llm_first_token", "tts", "total")
+                    if field in stream.latency
+                ))
+                stream.latency.clear()
         elif isinstance(message, AgentV1ConversationText):
             print(f"[{message.role}] {message.content}")
         elif isinstance(message, AgentV1Welcome):

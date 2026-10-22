@@ -5,6 +5,7 @@ call.py — place an outbound Vobiz call into the Deepgram agent.
     python call.py --to +919XXXXXXXXX
     python call.py --host abc123.ngrok-free.app   # override PUBLIC_HOSTNAME
     python call.py --dry-run                # print the payload without dialling
+    python call.py --machine-detection off  # let a voicemail or IVR through
 
 Inbound calls need none of this — create a Voice Application pointing at
 https://PUBLIC_HOSTNAME/answer and attach a number to it. This is for dialling out.
@@ -38,6 +39,11 @@ def main() -> None:
                         help="a DID this account owns")
     parser.add_argument("--host", default=os.getenv("PUBLIC_HOSTNAME", ""),
                         help="public host running app.py, no scheme")
+    parser.add_argument("--machine-detection", choices=("hangup", "true", "off"),
+                        default=os.getenv("MACHINE_DETECTION") or "hangup",
+                        help="what to do when an answering machine picks up: hangup "
+                             "(default) ends the call with cause 9100 Machine Detected, "
+                             "true detects and carries on, off sends nothing")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the payload and exit without placing a call")
     args = parser.parse_args()
@@ -71,6 +77,14 @@ def main() -> None:
         "hangup_url": f"{base}/hangup",
         "hangup_method": "POST",
     }
+    # Voicemail answers like a person, so without this the agent holds a
+    # conversation with the mailbox prompt until the mailbox gives up -- a minute
+    # or more of billed time per attempt, and the usual outcome when a carrier
+    # screens the caller ID. With `hangup` Vobiz drops the call the
+    # moment it decides a machine answered; the hangup webhook then reports
+    # cause 9100. `true` keeps the call up and leaves the decision to you.
+    if args.machine_detection != "off":
+        payload["machine_detection"] = args.machine_detection
     print(json.dumps(payload, indent=2))
     if args.dry_run:
         print("\n--dry-run: nothing was dialled.")

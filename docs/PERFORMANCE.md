@@ -21,10 +21,12 @@ Deepgram emits a `LatencyReport` per turn, broken down by stage. `app.py` logs i
 | `tts_latency` | first text token to first audio byte |
 | `total_latency` | caller stopped speaking to first audio byte |
 
-Deepgram also emits a report per *recognition segment*, tens of times per turn, which is useful
-detail when you are debugging recognition itself. Only the turn-level report carries
-`total_latency`, so that is the one `app.py` logs — the segment-level reports are far too frequent
-to belong in a call log.
+The fields do not arrive together. Each comes in its own `LatencyReport` message: `stt_latency`
+once per recognition segment, tens of times a turn, then `ttt_text_latency`, `tts_latency` and
+`total_latency` in quick succession once the reply starts. `app.py` merges them per turn and prints
+one line when `total_latency` arrives, keeping the last `stt_latency` seen. An earlier version
+printed only the report that carried `total_latency`, which on current Deepgram shows `total=`
+on its own.
 
 Measured on this stack, the split is uneven in a useful way:
 
@@ -62,6 +64,28 @@ wherever the provider runs — so this ranking is worth re-checking from your ow
 line-ups change; re-measure rather than trusting this table indefinitely.
 
 Set `LLM_PROVIDER` and `LLM_MODEL` to switch. Nothing else in the pipeline changes.
+
+## The first turn of a call is slower
+
+The first reply of a call is consistently slower than the ones after it. Measured with a
+three-question clip through `mock_vobiz.py`, six runs, India endpoint, `claude-haiku-4-5`:
+
+| | Turn 1 | Turns 2 and 3 |
+|---|---|---|
+| `total_latency`, median | 1155 ms | 1040 ms |
+| `total_latency`, range | 1075 – 1215 | 924 – 1287 |
+| `ttt_text_latency`, median (three runs with the breakdown) | 964 ms | 901 ms |
+| `stt_latency`, `tts_latency` | 40 – 100 ms, 49 – 115 ms | the same |
+
+The gap is modest from Bengaluru and may be larger from further away, and it lives entirely in
+the language-model stage.
+Recognition is flat across turns and synthesis is already warm from the greeting. What is cold on
+the first turn is the *think* provider: the greeting is pure TTS, so the first user turn is the
+first LLM request of the session, and it carries connection setup and an uncached prompt. That
+path runs inside Deepgram's agent service, so nothing in `app.py` can shorten it short of a
+throwaway LLM turn before the greeting, which would cost more than it saves. Note also that turn 3
+was slower than turn 2 in every run with the breakdown — after the first turn, what is asked
+matters more than when.
 
 ## The system prompt is a latency cost
 
